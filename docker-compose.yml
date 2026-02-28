@@ -1,0 +1,17 @@
+services:
+  api:
+    build: .
+    ports: ["8000:8000"]
+    env_file: .env
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:////app/data/zoombot.db
+    volumes:
+      - zoombot_data:/app/data
+
+volumes:
+  zoombot_data:
+
+  # Optional: Redis for future async processing
+  # redis:
+  #   image: redis:7-alpine
+  #   ports: ["6379:6379"]
