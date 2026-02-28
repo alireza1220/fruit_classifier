@@ -26,6 +26,7 @@ An AI-powered meeting bot that joins Zoom meetings, records audio, transcribes c
 - **[Full Implementation Plan](docs/ZOOM_AI_MEETING_BOT_IMPLEMENTATION_PLAN.md)** — Detailed phases and design
 - **[User Stories: Contact Center](docs/USER_STORIES_CONTACT_CENTER.md)** — User stories for Zoom Contact Center (not Zoom Meeting)
 - **[Bot Join Verification](docs/BOT_JOIN_VERIFICATION.md)** — Can a bot join? This app vs Zoom Agents
+- **[Contact Center Integration](docs/ZOOM_CONTACT_CENTER_INTEGRATION.md)** — How to integrate with Zoom Contact Center (different APIs)
 
 ## Features
 

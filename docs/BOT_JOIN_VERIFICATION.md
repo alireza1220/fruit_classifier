@@ -94,7 +94,15 @@ Contact Center calls are different from Meetings:
 - Agent must accept.
 - Different APIs and SDKs.
 
-**This app does not support Contact Center.** It would need Contact Center–specific APIs and flows. See [USER_STORIES_CONTACT_CENTER.md](USER_STORIES_CONTACT_CENTER.md).
+**This app does not support Contact Center.** It would need Contact Center–specific APIs and flows.
+
+**How to do Contact Center:** See [ZOOM_CONTACT_CENTER_INTEGRATION.md](ZOOM_CONTACT_CENTER_INTEGRATION.md) for:
+- Native recording (no bot needed) + Recordings API
+- Contact Center webhooks and scopes
+- Engagement ID vs meeting ID
+- Implementation checklist
+
+See also [USER_STORIES_CONTACT_CENTER.md](USER_STORIES_CONTACT_CENTER.md) for user stories.
 
 ---
 
