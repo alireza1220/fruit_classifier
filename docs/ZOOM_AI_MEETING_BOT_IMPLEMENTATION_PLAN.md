@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-This document provides a comprehensive implementation plan for building an AI-powered meeting bot that joins Zoom meetings, captures audio via Real-Time Meeting Streaming (RTMS), transcribes conversations, and generates intelligent summaries with action items, decisions, and next steps. It also supports **on-the-fly real-time transcription** with an **LLM-powered support copilot** to help customer support agents answer customer questions during live calls.
+This document provides a comprehensive implementation plan for building an AI-powered meeting bot that joins Zoom meetings, captures audio via Real-Time Meeting Streaming (RTMS), transcribes conversations, and generates intelligent summaries with action items, decisions, and next steps.
 
 ---
 
@@ -63,8 +63,6 @@ This document provides a comprehensive implementation plan for building an AI-po
 | **rtms-service** | Receive RTMS WebSocket stream, forward audio chunks | Node.js (WebSocket) or Python | 3002 |
 | **audio-service** | Reconstruct PCM chunks into WAV files (mixed + per-speaker) | Node.js or Python | 3003 |
 | **stt-service** | Speech-to-text transcription (Whisper, AssemblyAI, or Zoom) | Python (Whisper) or Node.js | 3004 |
-| **stt-streaming** | Real-time streaming STT for live calls | Python/Node + Deepgram/AssemblyAI | 3006 |
-| **support-copilot** | LLM-powered response suggestions for support agents | Python (LangChain) or Node.js | 3007 |
 | **summary-service** | LLM-based meeting intelligence (summary, actions, decisions) | Python (LangChain) or Node.js | 3005 |
 | **api-gateway** | REST API, webhooks, orchestration | Node.js (Express) or Python (FastAPI) | 3000 |
 | **web-ui** | Small UI to browse recordings and notes | React/Vue or static HTML | 8080 |
@@ -610,8 +608,7 @@ GROUP BY m.id;
 2. Bot in meeting
    └─> Webhooks: participant_joined/left → Store names in meeting_participants
    └─> RTMS Service: Receiving audio chunks
-       ├─> Audio Service: Buffering PCM (map participant_id → name for filenames)
-       └─> stt-streaming: Real-time STT → Live transcript → support-copilot → LLM suggestions → Agent UI
+       └─> Audio Service: Buffering PCM (map participant_id → name for filenames)
 
 3. Meeting ends
    └─> Webhook: meeting.ended
@@ -663,7 +660,6 @@ A lightweight web interface to browse recordings and view meeting notes.
 ```
 /                    → Recording list (date picker, participant filter)
 /recordings/:id      → Meeting detail: summary, transcript, participants, audio player
-/live/:meetingId     → Live Call Assist (support agents): real-time transcript + LLM suggestions
 ```
 
 ### 11.3 Wireframe (Conceptual)
@@ -738,131 +734,7 @@ A lightweight web interface to browse recordings and view meeting notes.
 
 ---
 
-## 12. Phase 10 — Real-Time Transcription + LLM Support Copilot
-
-On-the-fly transcription during live calls, with LLM-powered suggested responses to help customer support agents answer customer questions in real time.
-
-### 12.1 Use Case
-
-- **Support call in progress** → Customer speaks → Transcript appears live → LLM suggests an answer → Agent uses or adapts the suggestion to respond.
-
-### 12.2 Architecture
-
-```
-RTMS (audio stream)
-    ↓
-stt-streaming (streaming STT: Deepgram / AssemblyAI)
-    ↓
-Live transcript chunks (WebSocket)
-    ↓
-support-copilot (LLM)
-    ↓
-Suggested responses (WebSocket)
-    ↓
-Support Agent UI (live view)
-```
-
-### 12.3 Streaming STT
-
-| Provider | Streaming | Latency | Notes |
-|----------|-----------|---------|-------|
-| **Deepgram** | Yes | ~300ms | Real-time API, WebSocket |
-| **AssemblyAI** | Yes | ~500ms | Real-time streaming |
-| **Google Speech-to-Text** | Yes | ~400ms | StreamingRecognize |
-| **Whisper** | No | — | Batch only; not suitable for live |
-
-**Recommendation**: Deepgram or AssemblyAI for streaming. PCM from RTMS is sent directly to the streaming STT API (no need to wait for full WAV).
-
-### 12.4 Support Copilot Service
-
-**Input**: Rolling transcript (last N seconds or last M utterances from customer)
-
-**Process**:
-1. Receive transcript chunks via WebSocket or message queue
-2. Identify "customer" vs "agent" utterances (e.g., from speaker labels or channel)
-3. Send customer utterance(s) to LLM with context:
-   - Product/FAQ knowledge base (optional RAG)
-   - Recent conversation history
-   - Instruction: "Suggest a helpful response for the support agent"
-4. Stream or return suggested response to UI
-
-**Prompt structure**:
-```
-You are helping a customer support agent during a live call.
-The customer just said: "{customer_utterance}"
-
-Recent context: {last_3_exchanges}
-
-Suggest a concise, helpful response the agent can use or adapt.
-Keep it under 2-3 sentences. Be empathetic and solution-focused.
-```
-
-### 12.5 Support Agent UI (Live View)
-
-| Element | Description |
-|---------|-------------|
-| **Live transcript** | Streaming transcript, customer vs agent labeled |
-| **Suggested response** | LLM suggestion in a highlighted box; "Copy" or "Use" button |
-| **Knowledge base** | Optional: relevant FAQ/articles the LLM cited |
-| **Meeting/call info** | Date, participants, duration |
-
-**Layout**:
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  Live Call Assist · Meeting: 9876543210                         │
-├─────────────────────────────────────────────────────────────────┤
-│  TRANSCRIPT (live)                                               │
-│  ─────────────────────────────────────────────────────────────  │
-│  Customer: I'm having trouble logging in, it says invalid pass...│
-│  Agent: Let me help you with that. Can you try resetting your... │
-│  Customer: I already tried that, it's still not working.         │
-│  ─────────────────────────────────────────────────────────────  │
-│  💡 SUGGESTED RESPONSE (LLM)                                     │
-│  "I understand that's frustrating. Let's try a few things:     │
-│   1) Clear your browser cache and cookies                       │
-│   2) Try an incognito/private window                            │
-│   3) If still failing, I can escalate to reset your password    │
-│   from our side. Would you like me to do that?"                 │
-│  [Copy] [Use as draft]                                          │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### 12.6 Real-Time Delivery
-
-| Mechanism | Use |
-|-----------|-----|
-| **WebSocket** | stt-streaming → UI (live transcript); support-copilot → UI (suggestions) |
-| **Server-Sent Events (SSE)** | Alternative for one-way stream |
-| **Polling** | Fallback; higher latency |
-
-### 12.7 Data Flow (Dual Path)
-
-The system supports both:
-
-| Path | When | Output |
-|------|------|--------|
-| **Batch (existing)** | Post-meeting | Full transcript, summary, stored |
-| **Streaming (new)** | During meeting | Live transcript + LLM suggestions to agent UI |
-
-RTMS audio can be forked: one path to Audio Service (batch WAV), one path to stt-streaming (live transcript).
-
-### 12.8 Optional: RAG for Support
-
-- Ingest FAQ, help docs, product info into a vector store
-- LLM retrieves relevant chunks when generating suggestions
-- Improves accuracy of suggested responses
-
-### 12.9 Deliverables
-
-- [ ] stt-streaming service: RTMS audio → streaming STT → live transcript
-- [ ] support-copilot service: transcript → LLM → suggested response
-- [ ] WebSocket endpoint for live transcript + suggestions
-- [ ] Support Agent Live View in Web UI
-- [ ] Optional: RAG with FAQ/knowledge base
-
----
-
-## 13. Compliance
+## 12. Compliance
 
 ### 11.1 Bot Visibility
 
@@ -884,7 +756,7 @@ RTMS audio can be forked: one path to Audio Service (batch WAV), one path to stt
 
 ---
 
-## 14. Deployment
+## 13. Deployment
 
 ### 12.1 Docker Compose (MVP)
 
@@ -934,20 +806,6 @@ services:
       - OPENAI_API_KEY
       - DATABASE_URL
     depends_on: [postgres, redis]
-
-  stt-streaming:
-    build: ./stt-streaming
-    environment:
-      - DEEPGRAM_API_KEY
-      - REDIS_URL
-    depends_on: [redis]
-
-  support-copilot:
-    build: ./support-copilot
-    environment:
-      - OPENAI_API_KEY
-      - REDIS_URL
-    depends_on: [redis]
 
   web-ui:
     build: ./web-ui
@@ -1011,7 +869,7 @@ SUMMARY_SERVICE_URL=http://summary-service:3005
 
 ---
 
-## 15. Implementation Timeline
+## 14. Implementation Timeline
 
 | Week | Phase | Deliverables |
 |------|-------|--------------|
@@ -1021,7 +879,6 @@ SUMMARY_SERVICE_URL=http://summary-service:3005
 | **Week 4** | Transcription | STT produces timestamped transcripts |
 | **Week 5** | Summary + Storage | LLM summary, full pipeline, API |
 | **Week 6** | Web UI | Recording list, meeting detail, audio playback, download |
-| **Week 7** | Real-time + Copilot | Streaming STT, LLM support copilot, Live Call Assist UI |
 
 ### Milestone Checklist
 
@@ -1031,11 +888,10 @@ SUMMARY_SERVICE_URL=http://summary-service:3005
 - [ ] **M4 (Week 4)**: Transcript in database with speakers and timestamps
 - [ ] **M5 (Week 5)**: Summary with actions, decisions, risks, next steps; GET /meetings/:id/summary works
 - [ ] **M6 (Week 6)**: Web UI lists recordings, shows notes, plays audio, supports download
-- [ ] **M7 (Week 7)**: Live transcript during call; LLM suggests responses to support agent
 
 ---
 
-## 16. MVP Success Criteria
+## 15. MVP Success Criteria
 
 | Criterion | Verification |
 |-----------|---------------|
@@ -1044,12 +900,12 @@ SUMMARY_SERVICE_URL=http://summary-service:3005
 | ✔ Transcript generated | Transcripts table has rows for meeting |
 | ✔ Summary stored | Summaries table has row; API returns summary |
 | ✔ Web UI | Browse recordings by date/participant; view notes; play/download audio |
-| ✔ Live support copilot | On-the-fly transcript + LLM suggestions for support agents |
 
 ---
 
-## 17. Future Enhancements
+## 16. Future Enhancements
 
+- **Real-time transcript + Live Call Assist**: Stream transcript during call; LLM suggests responses for support agents
 - **Live summary**: Incremental summary during meeting (beyond post-meeting summary)
 - **Integration**: Slack/Teams notifications with summary
 - **Search**: Full-text search across transcripts
@@ -1071,7 +927,6 @@ SUMMARY_SERVICE_URL=http://summary-service:3005
 | GET | /recordings?date=YYYY-MM-DD | Recordings by call date |
 | GET | /recordings?participant=Name | Recordings where participant joined |
 | POST | /meetings/:id/join | Manual bot join trigger |
-| WS | /meetings/:id/live | WebSocket: live transcript + LLM suggestions (support copilot) |
 
 ---
 
@@ -1083,7 +938,6 @@ SUMMARY_SERVICE_URL=http://summary-service:3005
 - [Zoom RTMS](https://developers.zoom.us/docs/rtms/) *(request access)*
 - [OpenAI Whisper](https://github.com/openai/whisper)
 - [AssemblyAI](https://www.assemblyai.com/)
-- [Deepgram Real-Time](https://developers.deepgram.com/docs/streaming)
 
 ---
 
