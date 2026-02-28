@@ -285,14 +285,15 @@ Meeting ended → Finalize all buffers → Convert to WAV → Upload to storage
                                     → Emit "audio_ready" event
 ```
 
-### 6.4 Output Files
+### 6.4 Output Files (Structured by Date + Participants)
 
 | File | Path | Description |
 |------|------|-------------|
-| Mixed | `/audio/{meeting_id}/mixed.wav` | All participants combined |
-| Speaker A | `/audio/{meeting_id}/speaker_001.wav` | First speaker |
-| Speaker B | `/audio/{meeting_id}/speaker_002.wav` | Second speaker |
-| ... | ... | Per-participant tracks |
+| Mixed | `/audio/{YYYY-MM-DD}/{meeting_id}/mixed.wav` | All participants combined |
+| Participant | `/audio/{YYYY-MM-DD}/{meeting_id}/{Name}.wav` | Per-participant (e.g. `John_Doe.wav`) |
+| Metadata | `/audio/{YYYY-MM-DD}/{meeting_id}/metadata.json` | Date, participants, join/leave times |
+
+**Path derivation**: `YYYY-MM-DD` from meeting `start_time`; participant filenames from `meeting_participants.name` (sanitized).
 
 ### 6.5 WAV Header
 
@@ -431,16 +432,54 @@ Transcript:
 
 ## 9. Phase 7 — Storage
 
-### 9.1 Object Storage Layout
+### 9.1 Structured Recording Layout
+
+Recordings are organized by **date** and **participants** for easy discovery and retrieval.
+
+#### Object Storage Path Structure
 
 ```
 /audio/
-  {meeting_id}/
-    mixed.wav
-    speaker_001.wav
-    speaker_002.wav
-    ...
+  {YYYY-MM-DD}/                          ← Date of the call
+    {meeting_id}/
+      metadata.json                      ← Meeting + participant info
+      mixed.wav                          ← All participants combined
+      {participant_name_sanitized}.wav   ← Per-participant audio
+      ...
 ```
+
+**Example:**
+```
+/audio/
+  2025-02-28/
+    9876543210/
+      metadata.json
+      mixed.wav
+      John_Doe.wav
+      Jane_Smith.wav
+      Bob_Wilson.wav
+```
+
+#### `metadata.json` (per recording)
+
+```json
+{
+  "meeting_id": "9876543210",
+  "date": "2025-02-28",
+  "start_time": "2025-02-28T14:00:00Z",
+  "end_time": "2025-02-28T14:45:00Z",
+  "title": "Q4 Planning",
+  "host": "John Doe",
+  "participants": [
+    { "name": "John Doe", "zoom_user_id": "xxx", "join_time": "14:00:05", "leave_time": "14:45:00" },
+    { "name": "Jane Smith", "zoom_user_id": "yyy", "join_time": "14:01:12", "leave_time": "14:44:30" },
+    { "name": "Bob Wilson", "zoom_user_id": "zzz", "join_time": "14:05:00", "leave_time": "14:30:15" }
+  ],
+  "duration_seconds": 2700
+}
+```
+
+**Name sanitization**: Replace spaces and special chars with `_` (e.g., `John Doe` → `John_Doe`).
 
 ### 9.2 Database Schema
 
@@ -451,13 +490,26 @@ Transcript:
 | id | UUID | Primary key |
 | zoom_meeting_id | VARCHAR | Zoom's meeting ID |
 | title | VARCHAR | Meeting topic |
-| start_time | TIMESTAMP | When meeting started |
+| start_time | TIMESTAMP | When meeting started (call date) |
 | end_time | TIMESTAMP | When meeting ended |
+| call_date | DATE | Date of call (derived from start_time, for indexing) |
 | host_id | VARCHAR | Zoom host user ID |
-| participants | JSONB | List of participant IDs/names |
+| host_name | VARCHAR | Host display name |
 | status | VARCHAR | scheduled, in_progress, completed, failed |
 | created_at | TIMESTAMP | Record creation |
 | updated_at | TIMESTAMP | Last update |
+
+#### `meeting_participants`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | UUID | Primary key |
+| meeting_id | UUID | FK to meetings |
+| zoom_user_id | VARCHAR | Zoom participant ID |
+| name | VARCHAR | Participant display name |
+| join_time | TIMESTAMP | When they joined |
+| leave_time | TIMESTAMP | When they left |
+| speaker_track_index | INT | Maps to speaker_001, speaker_002 for audio files |
 
 #### `transcripts`
 
@@ -465,9 +517,10 @@ Transcript:
 |--------|------|-------------|
 | id | UUID | Primary key |
 | meeting_id | UUID | FK to meetings |
-| speaker | VARCHAR | speaker_001, etc. |
-| start_time | FLOAT | Seconds from start |
-| end_time | FLOAT | Seconds from start |
+| participant_id | UUID | FK to meeting_participants (nullable if unknown) |
+| speaker_name | VARCHAR | Resolved participant name |
+| start_time | FLOAT | Seconds from meeting start |
+| end_time | FLOAT | Seconds from meeting start |
 | text | TEXT | Transcript segment |
 | created_at | TIMESTAMP | Record creation |
 
@@ -490,15 +543,54 @@ Transcript:
 |--------|------|-------------|
 | id | UUID | Primary key |
 | meeting_id | UUID | FK to meetings |
+| call_date | DATE | Date of call (for querying by date) |
+| storage_path | VARCHAR | Base path: `{YYYY-MM-DD}/{meeting_id}/` |
 | mixed_audio_path | VARCHAR | Path to mixed.wav |
-| speaker_audio_paths | JSONB | Array of paths to speaker WAVs |
+| participant_audio_paths | JSONB | `{ "John Doe": "John_Doe.wav", "Jane Smith": "Jane_Smith.wav" }` |
 | duration_seconds | INT | Total duration |
+| participant_names | JSONB | Array of participant names (denormalized for quick access) |
 | created_at | TIMESTAMP | Record creation |
 
-### 9.3 Deliverables
+### 9.3 Participant Name Capture
+
+Participant names are obtained from:
+
+| Source | When | Data |
+|--------|------|------|
+| **Webhook** `meeting.participant_joined` | On join | `participant.user_name`, `participant.user_id` |
+| **RTMS** `audio.individual` | During stream | `participant_id` → map to name via webhook data |
+| **Zoom REST API** | Post-meeting | `GET /report/meetings/{meetingId}/participants` |
+
+Store participant join/leave events in `meeting_participants` as the meeting progresses. Use this to map `speaker_001` → `John Doe` when writing audio files and metadata.
+
+### 9.4 Query Examples
+
+**Recordings by date:**
+```sql
+SELECT * FROM recordings WHERE call_date = '2025-02-28';
+```
+
+**Recordings by participant name:**
+```sql
+SELECT r.* FROM recordings r
+WHERE r.participant_names @> '["John Doe"]'::jsonb;
+```
+
+**Meetings with participant list:**
+```sql
+SELECT m.*, array_agg(p.name) as participants
+FROM meetings m
+JOIN meeting_participants p ON p.meeting_id = m.id
+WHERE m.call_date = '2025-02-28'
+GROUP BY m.id;
+```
+
+### 9.5 Deliverables
 
 - [ ] PostgreSQL schema created (migrations)
-- [ ] Object Storage bucket configured
+- [ ] Object Storage bucket configured with date-based structure
+- [ ] `metadata.json` written per recording with participants and date
+- [ ] Participant names captured from webhooks/API and stored
 - [ ] All services write/read from storage correctly
 
 ---
@@ -513,8 +605,9 @@ Transcript:
        └─> Bot Service: Join meeting, start RTMS
 
 2. Bot in meeting
+   └─> Webhooks: participant_joined/left → Store names in meeting_participants
    └─> RTMS Service: Receiving audio chunks
-       └─> Audio Service: Buffering PCM
+       └─> Audio Service: Buffering PCM (map participant_id → name for filenames)
 
 3. Meeting ends
    └─> Webhook: meeting.ended
@@ -730,6 +823,8 @@ SUMMARY_SERVICE_URL=http://summary-service:3005
 | GET | /meetings/:id/transcript | Full transcript |
 | GET | /meetings/:id/summary | Summary, actions, decisions |
 | GET | /meetings/:id/recording | Recording metadata and download URLs |
+| GET | /recordings?date=YYYY-MM-DD | Recordings by call date |
+| GET | /recordings?participant=Name | Recordings where participant joined |
 | POST | /meetings/:id/join | Manual bot join trigger |
 
 ---
