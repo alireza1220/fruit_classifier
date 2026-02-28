@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.webhooks import router as webhooks_router
 from src.admin import router as admin_router
+from src.recordings import router as recordings_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ app.add_middleware(
 
 app.include_router(webhooks_router)
 app.include_router(admin_router)
+app.include_router(recordings_router)
 
 
 @app.get("/")

@@ -67,7 +67,7 @@ This document provides a comprehensive implementation plan for building an AI-po
 | **stt-service** | Speech-to-text transcription (Whisper, AssemblyAI, or Zoom) | Python (Whisper) or Node.js | 3004 |
 | **summary-service** | LLM-based meeting intelligence (summary, actions, decisions) | Python (LangChain) or Node.js | 3005 |
 | **api-gateway** | REST API, webhooks, orchestration | Node.js (Express) or Python (FastAPI) | 3000 |
-| **web-ui** | Small UI to browse recordings and notes | React/Vue or static HTML | 8080 |
+| **web-ui** | Next.js app to browse recordings and notes | Next.js 16, TypeScript, Tailwind | 3000 |
 | **database** | PostgreSQL for meetings, transcripts, summaries | PostgreSQL 15 | 5432 |
 | **object-storage** | MinIO or S3 for WAV files | MinIO/S3 | 9000 |
 
@@ -702,14 +702,15 @@ A lightweight web interface to browse recordings and view meeting notes.
 
 ### 11.4 Tech Stack
 
+**Implemented**: **Next.js** (App Router, TypeScript, Tailwind CSS)
+
 | Option | Pros | Cons |
 |--------|------|------|
-| **React + Vite** | Component-based, good DX | Slightly heavier |
+| **Next.js** ✓ | SSR, great DX, built-in routing | — |
+| **React + Vite** | Component-based, lightweight | — |
 | **Vue 3 + Vite** | Simple, lightweight | — |
-| **Static HTML + HTMX** | No build step, minimal | Less interactive |
-| **Next.js** | SSR, API routes | Overkill for small UI |
 
-**Recommendation**: React + Vite or Vue + Vite for a small SPA. Served by api-gateway or nginx.
+The web app lives in `web-app/` and runs on port 3000. It fetches data from the API (port 8000).
 
 ### 11.5 API Endpoints Used by UI
 
@@ -728,11 +729,11 @@ A lightweight web interface to browse recordings and view meeting notes.
 
 ### 11.7 Deliverables
 
-- [ ] Recording list page with date and participant filters
-- [ ] Meeting detail page with summary, transcript, action items
-- [ ] Audio player for mixed and per-speaker recordings
+- [x] Recording list page with date and participant filters
+- [x] Meeting detail page with summary, transcript, action items
+- [ ] Audio player for mixed and per-speaker recordings (when storage URLs available)
 - [ ] Download links for WAV files
-- [ ] Served alongside API or as static build
+- [x] Next.js app in `web-app/`, served on port 3000
 
 ---
 
@@ -809,10 +810,12 @@ services:
       - DATABASE_URL
     depends_on: [postgres, redis]
 
-  web-ui:
-    build: ./web-ui
-    ports: ["8080:80"]
-    depends_on: [api-gateway]
+  web:
+    build: ./web-app
+    ports: ["3000:3000"]
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on: [api]
 
   postgres:
     image: postgres:15

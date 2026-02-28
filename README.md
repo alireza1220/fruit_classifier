@@ -10,10 +10,12 @@ An AI-powered meeting bot that joins Zoom meetings, records audio, transcribes c
    ```bash
    # Local
    pip install -r requirements.txt
-   uvicorn src.main:app --reload --port 8000
+   uvicorn src.main:app --reload --port 8000   # API
+   cd web-app && npm run dev                   # Web app (Next.js) at http://localhost:3000
 
-   # Docker
+   # Docker (API + Web app)
    docker compose up
+   # API: http://localhost:8000  |  Web: http://localhost:3000
    ```
 4. **Set webhook URL** — In Zoom Marketplace, set Event notification endpoint to `https://your-domain.com/webhooks/zoom` (use [ngrok](https://ngrok.com/) for local dev)
 
@@ -28,4 +30,4 @@ An AI-powered meeting bot that joins Zoom meetings, records audio, transcribes c
 - Records audio (mixed + per-speaker)
 - Transcribes with speaker diarization
 - LLM-generated summaries, action items, decisions
-- Web UI to browse recordings and notes
+- **Next.js web app** to browse recordings and notes (recording list, meeting detail, transcript, action items)

@@ -2,6 +2,29 @@
 
 Clear guide for setting up the Zoom AI Meeting Bot (Instruction Bot): how it joins calls, required API keys, and whitelisting.
 
+## Web App (Next.js)
+
+The project includes a **Next.js** frontend at `web-app/`:
+
+- **Recording list** (`/`) — Browse recordings, filter by date and participant
+- **Meeting detail** (`/recordings/[id]`) — Summary, transcript, action items, decisions
+
+**Run locally:**
+```bash
+# Terminal 1: API
+uvicorn src.main:app --reload --port 8000
+
+# Terminal 2: Web app
+cd web-app && npm run dev
+```
+
+**Run with Docker:**
+```bash
+docker compose up
+# API: http://localhost:8000
+# Web app: http://localhost:3000
+```
+
 ---
 
 ## 1. How Instruction Bot Joins Calls

@@ -8,10 +8,14 @@ services:
     volumes:
       - zoombot_data:/app/data
 
+  web:
+    build: ./web-app
+    ports: ["3000:3000"]
+    environment:
+      # Browser fetches API; use host-accessible URL
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      - api
+
 volumes:
   zoombot_data:
-
-  # Optional: Redis for future async processing
-  # redis:
-  #   image: redis:7-alpine
-  #   ports: ["6379:6379"]
