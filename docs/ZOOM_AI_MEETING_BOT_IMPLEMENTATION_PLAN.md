@@ -1,0 +1,951 @@
+# Zoom AI Meeting Bot — Full Implementation Plan
+
+## Executive Summary
+
+This document provides a comprehensive implementation plan for building an AI-powered meeting bot that joins Zoom meetings, captures audio via Real-Time Meeting Streaming (RTMS), transcribes conversations, and generates intelligent summaries with action items, decisions, and next steps.
+
+> **Quick setup**: See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for a concise guide on how the bot joins calls, required API keys, and whitelisting.
+> **Architecture**: See [ARCHITECTURE.md](ARCHITECTURE.md) for system design, components, and data flow.
+
+---
+
+## 1. System Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         ZOOM AI MEETING BOT PIPELINE                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  Zoom Meeting Scheduled
+           │
+           ▼
+  ┌─────────────────┐
+  │  Webhook Event  │  meeting.started
+  └────────┬────────┘
+           │
+           ▼
+  ┌─────────────────┐
+  │   Bot Service   │  Joins meeting as "AI Note Taker (Recording)"
+  └────────┬────────┘
+           │
+           ▼
+  ┌─────────────────┐
+  │  RTMS Service   │  Subscribes to audio.raw, audio.individual
+  └────────┬────────┘
+           │
+           ▼
+  ┌─────────────────┐
+  │  Audio Service  │  Buffers PCM → Assembles → Writes WAV files
+  └────────┬────────┘
+           │
+           ▼
+  ┌─────────────────┐
+  │   STT Service   │  WAV → Timestamped transcript (speaker + text)
+  └────────┬────────┘
+           │
+           ▼
+  ┌─────────────────┐
+  │ Summary Service │  Transcript → LLM → Summary, actions, decisions, risks
+  └────────┬────────┘
+           │
+           ▼
+  ┌─────────────────┐
+  │     Storage     │  Database + Object Storage (audio, transcripts, summaries)
+  └─────────────────┘
+```
+
+---
+
+## 2. Architecture
+
+### 2.1 Service Breakdown
+
+| Service | Responsibility | Tech Stack | Port |
+|---------|----------------|------------|------|
+| **bot-service** | Join meetings via Zoom SDK, identify as recorder, trigger RTMS | Node.js/TypeScript or Python | 3001 |
+| **rtms-service** | Receive RTMS WebSocket stream, forward audio chunks | Node.js (WebSocket) or Python | 3002 |
+| **audio-service** | Reconstruct PCM chunks into WAV files (mixed + per-speaker) | Node.js or Python | 3003 |
+| **stt-service** | Speech-to-text transcription (Whisper, AssemblyAI, or Zoom) | Python (Whisper) or Node.js | 3004 |
+| **summary-service** | LLM-based meeting intelligence (summary, actions, decisions) | Python (LangChain) or Node.js | 3005 |
+| **api-gateway** | REST API, webhooks, orchestration | Node.js (Express) or Python (FastAPI) | 3000 |
+| **web-ui** | Next.js app to browse recordings and notes | Next.js 16, TypeScript, Tailwind | 3000 |
+| **database** | PostgreSQL for meetings, transcripts, summaries | PostgreSQL 15 | 5432 |
+| **object-storage** | MinIO or S3 for WAV files | MinIO/S3 | 9000 |
+
+### 2.2 Communication Patterns
+
+- **Synchronous**: REST for webhooks, API calls, service-to-service
+- **Asynchronous**: Message queue (Redis/RabbitMQ) for pipeline stages
+- **Real-time**: WebSocket for RTMS stream ingestion
+
+### 2.3 Data Flow
+
+```
+Webhook (HTTP) → Bot Service → Zoom SDK
+RTMS (WebSocket) → RTMS Service → Audio Service (via queue or direct)
+Audio Service → Object Storage (WAV) + Event
+Event → STT Service → Transcript
+Transcript → Summary Service → LLM
+All outputs → Database + Object Storage
+```
+
+---
+
+## 3. Phase 1 — Zoom Setup
+
+### 3.1 Create Server-to-Server OAuth App
+
+1. **Zoom Marketplace**: https://marketplace.zoom.us/
+2. **Create App** → Server-to-Server OAuth
+3. **Basic Info**:
+   - App name: `AI Meeting Bot`
+   - Short description: `Joins meetings to record, transcribe, and summarize`
+   - Company name, developer contact
+
+### 3.2 Enable Required Features
+
+| Feature | Purpose |
+|---------|---------|
+| **Meeting SDK** | Programmatic meeting join, bot presence |
+| **RTMS (Real-Time Meeting Streaming)** | Live audio/video stream from meetings |
+
+**Note**: RTMS requires explicit access request from Zoom. Submit via Zoom Developer Support or account representative.
+
+### 3.3 OAuth Scopes
+
+| Scope | Purpose |
+|-------|---------|
+| `meeting:read` | Read meeting details, participants |
+| `meeting:write` | Create/update meetings, join as bot |
+| `user:read` | User profile for bot identity |
+| `recording:read` | (Optional) Access cloud recordings |
+| `webhook` | Receive meeting lifecycle events |
+
+### 3.4 Webhook Subscription
+
+Subscribe to:
+
+| Event | Use Case |
+|-------|----------|
+| `meeting.started` | Trigger bot join |
+| `meeting.ended` | Finalize audio, trigger STT pipeline |
+| `meeting.participant_joined` | Track participants |
+| `meeting.participant_left` | Update participant list |
+
+### 3.5 Environment Variables (Phase 1)
+
+```env
+ZOOM_ACCOUNT_ID=xxx
+ZOOM_CLIENT_ID=xxx
+ZOOM_CLIENT_SECRET=xxx
+ZOOM_WEBHOOK_SECRET_TOKEN=xxx
+ZOOM_BOT_USER_EMAIL=bot@yourdomain.com
+```
+
+### 3.6 Deliverables
+
+- [ ] Zoom app created and approved
+- [ ] RTMS access granted
+- [ ] Webhook endpoint deployed and verified
+- [ ] Credentials stored securely (e.g., AWS Secrets Manager, Vault)
+
+---
+
+## 4. Phase 2 — Bot Service
+
+### 4.1 Responsibilities
+
+- Receive `meeting.started` webhook
+- Authenticate via Server-to-Server OAuth
+- Join meeting using Zoom Meeting SDK or REST API
+- Identify as **"AI Note Taker (Recording)"**
+- Trigger RTMS session for the meeting
+- Handle `meeting.ended` to leave gracefully
+
+### 4.2 Join Flow
+
+```
+1. Webhook: meeting.started
+2. Extract: meeting_id, host_id, join_url
+3. Get OAuth token (Server-to-Server)
+4. Call Zoom API: Start RTMS session (if available)
+5. Join meeting via SDK/API as bot
+6. Set display name: "AI Note Taker (Recording)"
+7. Stay in meeting until meeting.ended
+```
+
+### 4.3 Bot Configuration
+
+| Setting | Value |
+|---------|-------|
+| Display name | `AI Note Taker (Recording)` |
+| Join as | Bot / Service account |
+| Mute on join | Yes |
+| Video off | Yes |
+| Participant type | Recorder |
+
+### 4.4 API Endpoints (Bot Service)
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| POST | `/webhooks/zoom` | Receive Zoom webhooks |
+| POST | `/meetings/:id/join` | Manual trigger to join meeting |
+| GET | `/meetings/:id/status` | Bot join status |
+
+### 4.5 Compliance
+
+- **Visibility**: Bot appears in participant list
+- **Disclosure**: Display name includes "(Recording)"
+- **Consent**: Ensure meeting host/organization has recording consent policy
+
+### 4.6 Deliverables
+
+- [ ] Bot service deployed
+- [ ] Webhook handler validates and processes events
+- [ ] Bot successfully joins test meeting
+- [ ] RTMS session initiated on join
+
+---
+
+## 5. Phase 3 — RTMS Stream Service
+
+### 5.1 Responsibilities
+
+- Establish WebSocket connection to Zoom RTMS
+- Subscribe to audio streams:
+  - `audio.raw` — mixed audio from all participants
+  - `audio.individual` — per-participant audio tracks
+- Forward PCM chunks to Audio Service
+- Handle reconnection, backoff on failures
+
+### 5.2 RTMS Stream Types
+
+| Stream | Format | Use Case |
+|--------|--------|----------|
+| `audio.raw` | PCM 16kHz, 16-bit mono | Mixed meeting audio |
+| `audio.individual` | PCM 16kHz, 16-bit mono per participant | Speaker-diarized audio |
+
+### 5.3 Message Format (Expected)
+
+```json
+{
+  "event": "audio.raw",
+  "meeting_id": "xxx",
+  "participant_id": "optional_for_individual",
+  "timestamp": 1234567890,
+  "payload": "<base64_encoded_pcm>"
+}
+```
+
+*Actual format depends on Zoom RTMS API documentation.*
+
+### 5.4 Processing Logic
+
+```
+1. Connect to RTMS WebSocket (auth via OAuth token)
+2. Subscribe to audio.raw, audio.individual
+3. On message:
+   - Decode base64 PCM
+   - Route to Audio Service (HTTP or message queue)
+   - Include meeting_id, participant_id, timestamp
+4. On meeting.ended: close connection, signal Audio Service to finalize
+```
+
+### 5.5 Deliverables
+
+- [ ] RTMS service connects and subscribes
+- [ ] PCM chunks forwarded to Audio Service
+- [ ] Reconnection logic for dropped connections
+- [ ] Graceful shutdown on meeting end
+
+---
+
+## 6. Phase 4 — Audio Service
+
+### 6.1 Responsibilities
+
+- Receive PCM audio chunks from RTMS Service
+- Buffer chunks per meeting and per speaker
+- Assemble into complete WAV files
+- Write to Object Storage
+- Emit event when audio is finalized (trigger STT)
+
+### 6.2 Input Specification
+
+| Parameter | Value |
+|-----------|-------|
+| Sample rate | 16 kHz |
+| Bit depth | 16-bit |
+| Channels | Mono |
+| Format | PCM (raw) |
+
+### 6.3 Processing Pipeline
+
+```
+Receive chunk → Validate meeting_id → Append to buffer
+                                    → (mixed buffer)
+                                    → (speaker_X buffer)
+Meeting ended → Finalize all buffers → Convert to WAV → Upload to storage
+                                    → Emit "audio_ready" event
+```
+
+### 6.4 Output Files (Structured by Date + Participants)
+
+| File | Path | Description |
+|------|------|-------------|
+| Mixed | `/audio/{YYYY-MM-DD}/{meeting_id}/mixed.wav` | All participants combined |
+| Participant | `/audio/{YYYY-MM-DD}/{meeting_id}/{Name}.wav` | Per-participant (e.g. `John_Doe.wav`) |
+| Metadata | `/audio/{YYYY-MM-DD}/{meeting_id}/metadata.json` | Date, participants, join/leave times |
+
+**Path derivation**: `YYYY-MM-DD` from meeting `start_time`; participant filenames from `meeting_participants.name` (sanitized).
+
+### 6.5 WAV Header
+
+- Format: 16-bit PCM, 16kHz, mono
+- RIFF header with correct chunk sizes
+
+### 6.6 Deliverables
+
+- [ ] Audio Service receives and buffers PCM
+- [ ] WAV files generated correctly
+- [ ] Files uploaded to Object Storage
+- [ ] Event emitted for downstream STT
+
+---
+
+## 7. Phase 5 — Transcription Service (STT)
+
+### 7.1 Responsibilities
+
+- Consume "audio_ready" events
+- Download WAV files from Object Storage
+- Run Speech-to-Text (Whisper, AssemblyAI, or Zoom)
+- Produce timestamped transcript with speaker labels
+- Store in database
+
+### 7.2 STT Options
+
+| Provider | Pros | Cons |
+|----------|------|------|
+| **OpenAI Whisper** | High quality, self-hostable | CPU/GPU intensive |
+| **AssemblyAI** | Speaker diarization built-in | Cost per minute |
+| **Zoom** | Native integration | May require Zoom transcription add-on |
+| **Deepgram** | Fast, real-time | API cost |
+
+**Recommendation**: Start with **Whisper** (self-hosted or API) for MVP; consider AssemblyAI for production speaker diarization.
+
+### 7.3 Transcript Schema
+
+```json
+{
+  "meeting_id": "xxx",
+  "segments": [
+    {
+      "speaker": "speaker_001",
+      "start_time": 0.5,
+      "end_time": 3.2,
+  "text": "Let's discuss the Q4 roadmap."
+    },
+    {
+      "speaker": "speaker_002",
+      "start_time": 3.5,
+      "end_time": 6.1,
+      "text": "I think we should prioritize the API migration."
+    }
+  ]
+}
+```
+
+### 7.4 Processing Flow
+
+```
+1. Receive event: { meeting_id, mixed_audio_path, speaker_audio_paths }
+2. Download mixed.wav (or use speaker files for diarization)
+3. Run STT:
+   - Option A: Transcribe mixed, use speaker files for diarization
+   - Option B: Transcribe each speaker file, merge by timestamp
+4. Output: segments with speaker, start_time, end_time, text
+5. Store in `transcripts` table
+6. Emit "transcript_ready" event for Summary Service
+```
+
+### 7.5 Deliverables
+
+- [ ] STT pipeline processes WAV files
+- [ ] Transcripts stored with timestamps and speakers
+- [ ] Event emitted for Summary Service
+
+---
+
+## 8. Phase 6 — Summary Service
+
+### 8.1 Responsibilities
+
+- Consume "transcript_ready" events
+- Send full transcript to LLM
+- Extract: summary, action items, decisions, risks, next steps
+- Store in database
+
+### 8.2 LLM Integration
+
+| Provider | Model | Use Case |
+|----------|-------|----------|
+| OpenAI | GPT-4o / GPT-4o-mini | Summary, extraction |
+| Anthropic | Claude 3.5 | Alternative |
+| Local | Llama 3, Mistral | Self-hosted option |
+
+### 8.3 Prompt Structure
+
+```
+You are a meeting analyst. Given the following transcript from a Zoom meeting,
+produce a structured output:
+
+1. **Summary**: 2-3 paragraph executive summary
+2. **Action Items**: List of tasks with assignee (if mentioned) and due date (if mentioned)
+3. **Decisions**: Key decisions made
+4. **Risks**: Identified risks or concerns
+5. **Next Steps**: Recommended follow-up actions
+
+Transcript:
+{transcript}
+```
+
+### 8.4 Output Schema
+
+```json
+{
+  "meeting_id": "xxx",
+  "summary": "The team discussed...",
+  "action_items": [
+    { "task": "Send proposal to client", "assignee": "John", "due": "2025-03-05" }
+  ],
+  "decisions": ["Approved Q4 budget increase"],
+  "risks": ["Timeline may slip if design review is delayed"],
+  "next_steps": ["Schedule follow-up for March 10"]
+}
+```
+
+### 8.5 Deliverables
+
+- [ ] Summary Service consumes transcript events
+- [ ] LLM prompt produces structured output
+- [ ] Results stored in `summaries` table
+- [ ] API endpoint to retrieve summary by meeting_id
+
+---
+
+## 9. Phase 7 — Storage
+
+### 9.1 Structured Recording Layout
+
+Recordings are organized by **date** and **participants** for easy discovery and retrieval.
+
+#### Object Storage Path Structure
+
+```
+/audio/
+  {YYYY-MM-DD}/                          ← Date of the call
+    {meeting_id}/
+      metadata.json                      ← Meeting + participant info
+      mixed.wav                          ← All participants combined
+      {participant_name_sanitized}.wav   ← Per-participant audio
+      ...
+```
+
+**Example:**
+```
+/audio/
+  2025-02-28/
+    9876543210/
+      metadata.json
+      mixed.wav
+      John_Doe.wav
+      Jane_Smith.wav
+      Bob_Wilson.wav
+```
+
+#### `metadata.json` (per recording)
+
+```json
+{
+  "meeting_id": "9876543210",
+  "date": "2025-02-28",
+  "start_time": "2025-02-28T14:00:00Z",
+  "end_time": "2025-02-28T14:45:00Z",
+  "title": "Q4 Planning",
+  "host": "John Doe",
+  "participants": [
+    { "name": "John Doe", "zoom_user_id": "xxx", "join_time": "14:00:05", "leave_time": "14:45:00" },
+    { "name": "Jane Smith", "zoom_user_id": "yyy", "join_time": "14:01:12", "leave_time": "14:44:30" },
+    { "name": "Bob Wilson", "zoom_user_id": "zzz", "join_time": "14:05:00", "leave_time": "14:30:15" }
+  ],
+  "duration_seconds": 2700
+}
+```
+
+**Name sanitization**: Replace spaces and special chars with `_` (e.g., `John Doe` → `John_Doe`).
+
+### 9.2 Database Schema
+
+#### `meetings`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | UUID | Primary key |
+| zoom_meeting_id | VARCHAR | Zoom's meeting ID |
+| title | VARCHAR | Meeting topic |
+| start_time | TIMESTAMP | When meeting started (call date) |
+| end_time | TIMESTAMP | When meeting ended |
+| call_date | DATE | Date of call (derived from start_time, for indexing) |
+| host_id | VARCHAR | Zoom host user ID |
+| host_name | VARCHAR | Host display name |
+| status | VARCHAR | scheduled, in_progress, completed, failed |
+| created_at | TIMESTAMP | Record creation |
+| updated_at | TIMESTAMP | Last update |
+
+#### `meeting_participants`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | UUID | Primary key |
+| meeting_id | UUID | FK to meetings |
+| zoom_user_id | VARCHAR | Zoom participant ID |
+| name | VARCHAR | Participant display name |
+| join_time | TIMESTAMP | When they joined |
+| leave_time | TIMESTAMP | When they left |
+| speaker_track_index | INT | Maps to speaker_001, speaker_002 for audio files |
+
+#### `transcripts`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | UUID | Primary key |
+| meeting_id | UUID | FK to meetings |
+| participant_id | UUID | FK to meeting_participants (nullable if unknown) |
+| speaker_name | VARCHAR | Resolved participant name |
+| start_time | FLOAT | Seconds from meeting start |
+| end_time | FLOAT | Seconds from meeting start |
+| text | TEXT | Transcript segment |
+| created_at | TIMESTAMP | Record creation |
+
+#### `summaries`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | UUID | Primary key |
+| meeting_id | UUID | FK to meetings |
+| summary | TEXT | Executive summary |
+| action_items | JSONB | Array of action items |
+| decisions | JSONB | Array of decisions |
+| risks | JSONB | Array of risks |
+| next_steps | JSONB | Array of next steps |
+| created_at | TIMESTAMP | Record creation |
+
+#### `recordings`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | UUID | Primary key |
+| meeting_id | UUID | FK to meetings |
+| call_date | DATE | Date of call (for querying by date) |
+| storage_path | VARCHAR | Base path: `{YYYY-MM-DD}/{meeting_id}/` |
+| mixed_audio_path | VARCHAR | Path to mixed.wav |
+| participant_audio_paths | JSONB | `{ "John Doe": "John_Doe.wav", "Jane Smith": "Jane_Smith.wav" }` |
+| duration_seconds | INT | Total duration |
+| participant_names | JSONB | Array of participant names (denormalized for quick access) |
+| created_at | TIMESTAMP | Record creation |
+
+### 9.3 Participant Name Capture
+
+Participant names are obtained from:
+
+| Source | When | Data |
+|--------|------|------|
+| **Webhook** `meeting.participant_joined` | On join | `participant.user_name`, `participant.user_id` |
+| **RTMS** `audio.individual` | During stream | `participant_id` → map to name via webhook data |
+| **Zoom REST API** | Post-meeting | `GET /report/meetings/{meetingId}/participants` |
+
+Store participant join/leave events in `meeting_participants` as the meeting progresses. Use this to map `speaker_001` → `John Doe` when writing audio files and metadata.
+
+### 9.4 Query Examples
+
+**Recordings by date:**
+```sql
+SELECT * FROM recordings WHERE call_date = '2025-02-28';
+```
+
+**Recordings by participant name:**
+```sql
+SELECT r.* FROM recordings r
+WHERE r.participant_names @> '["John Doe"]'::jsonb;
+```
+
+**Meetings with participant list:**
+```sql
+SELECT m.*, array_agg(p.name) as participants
+FROM meetings m
+JOIN meeting_participants p ON p.meeting_id = m.id
+WHERE m.call_date = '2025-02-28'
+GROUP BY m.id;
+```
+
+### 9.5 Deliverables
+
+- [ ] PostgreSQL schema created (migrations)
+- [ ] Object Storage bucket configured with date-based structure
+- [ ] `metadata.json` written per recording with participants and date
+- [ ] Participant names captured from webhooks/API and stored
+- [ ] All services write/read from storage correctly
+
+---
+
+## 10. Phase 8 — Workflow Orchestration
+
+### 10.1 End-to-End Flow
+
+```
+1. Meeting starts
+   └─> Webhook: meeting.started
+       └─> Bot Service: Join meeting, start RTMS
+
+2. Bot in meeting
+   └─> Webhooks: participant_joined/left → Store names in meeting_participants
+   └─> RTMS Service: Receiving audio chunks
+       └─> Audio Service: Buffering PCM (map participant_id → name for filenames)
+
+3. Meeting ends
+   └─> Webhook: meeting.ended
+       └─> Bot Service: Leave meeting
+       └─> RTMS Service: Close connection
+       └─> Audio Service: Finalize buffers → Write WAV → Upload → Emit "audio_ready"
+
+4. Post-meeting pipeline
+   └─> STT Service: audio_ready → Transcribe → Store transcript → Emit "transcript_ready"
+   └─> Summary Service: transcript_ready → LLM → Store summary
+
+5. Complete
+   └─> All data in DB + Object Storage
+   └─> API: GET /meetings/:id/summary
+```
+
+### 10.2 Error Handling
+
+| Failure Point | Recovery |
+|---------------|----------|
+| Bot fails to join | Retry up to 3x; alert; mark meeting as failed |
+| RTMS disconnect | Reconnect with backoff; if meeting ended, use partial audio |
+| Audio buffer overflow | Chunk into segments; process partial |
+| STT failure | Retry; fallback to raw transcript if available |
+| LLM failure | Retry; store partial summary |
+
+### 10.3 Idempotency
+
+- Use `meeting_id` as idempotency key for pipeline stages
+- Avoid duplicate transcripts/summaries for same meeting
+
+---
+
+## 11. Phase 9 — Web UI
+
+A lightweight web interface to browse recordings and view meeting notes.
+
+### 11.1 Scope (Small UI)
+
+| Feature | Description |
+|---------|-------------|
+| **Recording list** | Browse recordings by date, filter by participant |
+| **Meeting detail** | View summary, transcript, action items, participants |
+| **Audio playback** | Play mixed or per-speaker recording in browser |
+| **Download** | Download WAV files |
+
+### 11.2 Pages / Views
+
+```
+/                    → Recording list (date picker, participant filter)
+/recordings/:id      → Meeting detail: summary, transcript, participants, audio player
+```
+
+### 11.3 Wireframe (Conceptual)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  AI Meeting Notes                                    [Filter ▼]  │
+├─────────────────────────────────────────────────────────────────┤
+│  Date: [2025-02-28]   Participant: [All ▼]                       │
+├─────────────────────────────────────────────────────────────────┤
+│  📅 Feb 28, 2025                                                 │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │ Q4 Planning · 45 min · John Doe, Jane Smith, Bob Wilson     │ │
+│  │ [View Notes] [Play] [Download]                              │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │ Sprint Review · 30 min · Jane Smith, Alice Lee              │ │
+│  │ [View Notes] [Play] [Download]                              │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│  ← Back    Q4 Planning · Feb 28, 2025                           │
+├─────────────────────────────────────────────────────────────────┤
+│  Participants: John Doe, Jane Smith, Bob Wilson                  │
+│  Duration: 45 min                                               │
+├─────────────────────────────────────────────────────────────────┤
+│  SUMMARY                                                        │
+│  The team discussed Q4 priorities...                            │
+├─────────────────────────────────────────────────────────────────┤
+│  ACTION ITEMS          │  TRANSCRIPT                             │
+│  • Send proposal (John)│  [00:00] John: Let's start...           │
+│  • Review design (Jane)│  [00:15] Jane: I'll have it by Fri...  │
+├─────────────────────────────────────────────────────────────────┤
+│  [▶ Play Recording]   [Download mixed.wav] [Download by speaker] │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 11.4 Tech Stack
+
+**Implemented**: **Next.js** (App Router, TypeScript, Tailwind CSS)
+
+| Option | Pros | Cons |
+|--------|------|------|
+| **Next.js** ✓ | SSR, great DX, built-in routing | — |
+| **React + Vite** | Component-based, lightweight | — |
+| **Vue 3 + Vite** | Simple, lightweight | — |
+
+The web app lives in `web-app/` and runs on port 3000. It fetches data from the API (port 8000).
+
+### 11.5 API Endpoints Used by UI
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /recordings?date=&participant=` | List recordings |
+| `GET /meetings/:id` | Meeting details |
+| `GET /meetings/:id/summary` | Summary, actions, decisions |
+| `GET /meetings/:id/transcript` | Full transcript |
+| `GET /meetings/:id/recording` | Recording metadata + signed download URLs |
+
+### 11.6 Audio Playback
+
+- Use HTML5 `<audio>` with signed URL (presigned S3/MinIO URL, short expiry)
+- Or stream via API: `GET /recordings/:id/audio?file=mixed.wav`
+
+### 11.7 Deliverables
+
+- [x] Recording list page with date and participant filters
+- [x] Meeting detail page with summary, transcript, action items
+- [ ] Audio player for mixed and per-speaker recordings (when storage URLs available)
+- [ ] Download links for WAV files
+- [x] Next.js app in `web-app/`, served on port 3000
+
+---
+
+## 12. Compliance
+
+### 11.1 Bot Visibility
+
+- Bot must appear in Zoom participant list
+- Display name: **"AI Note Taker (Recording)"**
+- No hidden or disguised participation
+
+### 11.2 Recording Disclosure
+
+- Display name explicitly indicates recording
+- Consider: Zoom in-meeting notification when bot joins (if supported)
+- Organization should have recording consent policy
+
+### 11.3 Data Retention
+
+- Define retention policy for audio and transcripts
+- Support deletion requests (GDPR, etc.)
+- Encrypt audio at rest
+
+---
+
+## 13. Deployment
+
+### 12.1 Docker Compose (MVP)
+
+```yaml
+services:
+  api-gateway:
+    build: ./api-gateway
+    ports: ["3000:3000"]
+    environment:
+      - DATABASE_URL
+      - ZOOM_*
+    depends_on: [postgres, redis]
+
+  bot-service:
+    build: ./bot-service
+    environment:
+      - ZOOM_*
+      - REDIS_URL
+    depends_on: [redis]
+
+  rtms-service:
+    build: ./rtms-service
+    environment:
+      - ZOOM_*
+      - AUDIO_SERVICE_URL
+    depends_on: [redis]
+
+  audio-service:
+    build: ./audio-service
+    environment:
+      - STORAGE_ENDPOINT
+      - STORAGE_ACCESS_KEY
+      - REDIS_URL
+    depends_on: [minio, redis]
+
+  stt-service:
+    build: ./stt-service
+    environment:
+      - OPENAI_API_KEY
+      - DATABASE_URL
+      - STORAGE_*
+    depends_on: [postgres, minio, redis]
+
+  summary-service:
+    build: ./summary-service
+    environment:
+      - OPENAI_API_KEY
+      - DATABASE_URL
+    depends_on: [postgres, redis]
+
+  web:
+    build: ./web-app
+    ports: ["3000:3000"]
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on: [api]
+
+  postgres:
+    image: postgres:15
+    volumes: [pgdata:/var/lib/postgresql/data]
+    environment:
+      POSTGRES_USER: zoombot
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: zoombot
+
+  redis:
+    image: redis:7-alpine
+
+  minio:
+    image: minio/minio
+    command: server /data
+    volumes: [miniodata:/data]
+```
+
+### 12.2 Kubernetes (Production)
+
+- Deploy each service as Deployment
+- Use ConfigMaps/Secrets for env
+- Ingress for API + webhooks
+- Horizontal Pod Autoscaler for STT/Summary (CPU-bound)
+
+### 12.3 Environment Variables (Full)
+
+```env
+# Zoom
+ZOOM_ACCOUNT_ID=
+ZOOM_CLIENT_ID=
+ZOOM_CLIENT_SECRET=
+ZOOM_WEBHOOK_SECRET_TOKEN=
+ZOOM_BOT_USER_EMAIL=
+
+# Database
+DATABASE_URL=postgresql://user:pass@postgres:5432/zoombot
+
+# Redis (optional, for queue)
+REDIS_URL=redis://redis:6379
+
+# Object Storage (MinIO/S3)
+STORAGE_ENDPOINT=http://minio:9000
+STORAGE_ACCESS_KEY=
+STORAGE_SECRET_KEY=
+STORAGE_BUCKET=zoom-audio
+
+# AI
+OPENAI_API_KEY=
+
+# Services (internal)
+AUDIO_SERVICE_URL=http://audio-service:3003
+STT_SERVICE_URL=http://stt-service:3004
+SUMMARY_SERVICE_URL=http://summary-service:3005
+```
+
+---
+
+## 14. Implementation Timeline
+
+| Week | Phase | Deliverables |
+|------|-------|--------------|
+| **Week 1** | Zoom setup + Bot | Zoom app, webhooks, bot joins meeting |
+| **Week 2** | RTMS | RTMS service ingests audio stream |
+| **Week 3** | Audio | WAV files saved to object storage |
+| **Week 4** | Transcription | STT produces timestamped transcripts |
+| **Week 5** | Summary + Storage | LLM summary, full pipeline, API |
+| **Week 6** | Web UI | Recording list, meeting detail, audio playback, download |
+
+### Milestone Checklist
+
+- [ ] **M1 (Week 1)**: Bot joins test meeting, visible as "AI Note Taker (Recording)"
+- [ ] **M2 (Week 2)**: RTMS delivers PCM chunks to Audio Service
+- [ ] **M3 (Week 3)**: mixed.wav and speaker WAVs in object storage
+- [ ] **M4 (Week 4)**: Transcript in database with speakers and timestamps
+- [ ] **M5 (Week 5)**: Summary with actions, decisions, risks, next steps; GET /meetings/:id/summary works
+- [ ] **M6 (Week 6)**: Web UI lists recordings, shows notes, plays audio, supports download
+
+---
+
+## 15. MVP Success Criteria
+
+| Criterion | Verification |
+|-----------|---------------|
+| ✔ Bot joins meeting | Bot appears in participant list with correct name |
+| ✔ Audio saved | mixed.wav and speaker WAVs exist in storage |
+| ✔ Transcript generated | Transcripts table has rows for meeting |
+| ✔ Summary stored | Summaries table has row; API returns summary |
+| ✔ Web UI | Browse recordings by date/participant; view notes; play/download audio |
+
+---
+
+## 16. Future Enhancements
+
+- **Real-time transcript + Live Call Assist**: Stream transcript during call; LLM suggests responses for support agents
+- **Live summary**: Incremental summary during meeting (beyond post-meeting summary)
+- **Integration**: Slack/Teams notifications with summary
+- **Search**: Full-text search across transcripts
+- **Analytics**: Meeting duration, participant engagement
+- **Multi-language**: Support non-English meetings
+
+---
+
+## Appendix A: API Reference (Proposed)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | /webhooks/zoom | Zoom webhook receiver |
+| GET | /meetings | List meetings |
+| GET | /meetings/:id | Meeting details |
+| GET | /meetings/:id/transcript | Full transcript |
+| GET | /meetings/:id/summary | Summary, actions, decisions |
+| GET | /meetings/:id/recording | Recording metadata and download URLs |
+| GET | /recordings?date=YYYY-MM-DD | Recordings by call date |
+| GET | /recordings?participant=Name | Recordings where participant joined |
+| POST | /meetings/:id/join | Manual bot join trigger |
+
+---
+
+## Appendix B: References
+
+- [Zoom Meeting SDK](https://developers.zoom.us/docs/meeting-sdk/)
+- [Zoom Server-to-Server OAuth](https://developers.zoom.us/docs/internal-apps/s2s-oauth/)
+- [Zoom Webhooks](https://developers.zoom.us/docs/api/rest/webhook-reference/)
+- [Zoom RTMS](https://developers.zoom.us/docs/rtms/) *(request access)*
+- [OpenAI Whisper](https://github.com/openai/whisper)
+- [AssemblyAI](https://www.assemblyai.com/)
+
+---
+
+*Document version: 1.0*  
+*Last updated: February 28, 2025*
