@@ -65,6 +65,7 @@ This document provides a comprehensive implementation plan for building an AI-po
 | **stt-service** | Speech-to-text transcription (Whisper, AssemblyAI, or Zoom) | Python (Whisper) or Node.js | 3004 |
 | **summary-service** | LLM-based meeting intelligence (summary, actions, decisions) | Python (LangChain) or Node.js | 3005 |
 | **api-gateway** | REST API, webhooks, orchestration | Node.js (Express) or Python (FastAPI) | 3000 |
+| **web-ui** | Small UI to browse recordings and notes | React/Vue or static HTML | 8080 |
 | **database** | PostgreSQL for meetings, transcripts, summaries | PostgreSQL 15 | 5432 |
 | **object-storage** | MinIO or S3 for WAV files | MinIO/S3 | 9000 |
 
@@ -641,7 +642,99 @@ GROUP BY m.id;
 
 ---
 
-## 11. Compliance
+## 11. Phase 9 — Web UI
+
+A lightweight web interface to browse recordings and view meeting notes.
+
+### 11.1 Scope (Small UI)
+
+| Feature | Description |
+|---------|-------------|
+| **Recording list** | Browse recordings by date, filter by participant |
+| **Meeting detail** | View summary, transcript, action items, participants |
+| **Audio playback** | Play mixed or per-speaker recording in browser |
+| **Download** | Download WAV files |
+
+### 11.2 Pages / Views
+
+```
+/                    → Recording list (date picker, participant filter)
+/recordings/:id      → Meeting detail: summary, transcript, participants, audio player
+```
+
+### 11.3 Wireframe (Conceptual)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  AI Meeting Notes                                    [Filter ▼]  │
+├─────────────────────────────────────────────────────────────────┤
+│  Date: [2025-02-28]   Participant: [All ▼]                       │
+├─────────────────────────────────────────────────────────────────┤
+│  📅 Feb 28, 2025                                                 │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │ Q4 Planning · 45 min · John Doe, Jane Smith, Bob Wilson     │ │
+│  │ [View Notes] [Play] [Download]                              │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │ Sprint Review · 30 min · Jane Smith, Alice Lee              │ │
+│  │ [View Notes] [Play] [Download]                              │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│  ← Back    Q4 Planning · Feb 28, 2025                           │
+├─────────────────────────────────────────────────────────────────┤
+│  Participants: John Doe, Jane Smith, Bob Wilson                  │
+│  Duration: 45 min                                               │
+├─────────────────────────────────────────────────────────────────┤
+│  SUMMARY                                                        │
+│  The team discussed Q4 priorities...                            │
+├─────────────────────────────────────────────────────────────────┤
+│  ACTION ITEMS          │  TRANSCRIPT                             │
+│  • Send proposal (John)│  [00:00] John: Let's start...           │
+│  • Review design (Jane)│  [00:15] Jane: I'll have it by Fri...  │
+├─────────────────────────────────────────────────────────────────┤
+│  [▶ Play Recording]   [Download mixed.wav] [Download by speaker] │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 11.4 Tech Stack
+
+| Option | Pros | Cons |
+|--------|------|------|
+| **React + Vite** | Component-based, good DX | Slightly heavier |
+| **Vue 3 + Vite** | Simple, lightweight | — |
+| **Static HTML + HTMX** | No build step, minimal | Less interactive |
+| **Next.js** | SSR, API routes | Overkill for small UI |
+
+**Recommendation**: React + Vite or Vue + Vite for a small SPA. Served by api-gateway or nginx.
+
+### 11.5 API Endpoints Used by UI
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /recordings?date=&participant=` | List recordings |
+| `GET /meetings/:id` | Meeting details |
+| `GET /meetings/:id/summary` | Summary, actions, decisions |
+| `GET /meetings/:id/transcript` | Full transcript |
+| `GET /meetings/:id/recording` | Recording metadata + signed download URLs |
+
+### 11.6 Audio Playback
+
+- Use HTML5 `<audio>` with signed URL (presigned S3/MinIO URL, short expiry)
+- Or stream via API: `GET /recordings/:id/audio?file=mixed.wav`
+
+### 11.7 Deliverables
+
+- [ ] Recording list page with date and participant filters
+- [ ] Meeting detail page with summary, transcript, action items
+- [ ] Audio player for mixed and per-speaker recordings
+- [ ] Download links for WAV files
+- [ ] Served alongside API or as static build
+
+---
+
+## 12. Compliance
 
 ### 11.1 Bot Visibility
 
@@ -663,7 +756,7 @@ GROUP BY m.id;
 
 ---
 
-## 12. Deployment
+## 13. Deployment
 
 ### 12.1 Docker Compose (MVP)
 
@@ -713,6 +806,11 @@ services:
       - OPENAI_API_KEY
       - DATABASE_URL
     depends_on: [postgres, redis]
+
+  web-ui:
+    build: ./web-ui
+    ports: ["8080:80"]
+    depends_on: [api-gateway]
 
   postgres:
     image: postgres:15
@@ -771,7 +869,7 @@ SUMMARY_SERVICE_URL=http://summary-service:3005
 
 ---
 
-## 13. Implementation Timeline
+## 14. Implementation Timeline
 
 | Week | Phase | Deliverables |
 |------|-------|--------------|
@@ -780,6 +878,7 @@ SUMMARY_SERVICE_URL=http://summary-service:3005
 | **Week 3** | Audio | WAV files saved to object storage |
 | **Week 4** | Transcription | STT produces timestamped transcripts |
 | **Week 5** | Summary + Storage | LLM summary, full pipeline, API |
+| **Week 6** | Web UI | Recording list, meeting detail, audio playback, download |
 
 ### Milestone Checklist
 
@@ -788,10 +887,11 @@ SUMMARY_SERVICE_URL=http://summary-service:3005
 - [ ] **M3 (Week 3)**: mixed.wav and speaker WAVs in object storage
 - [ ] **M4 (Week 4)**: Transcript in database with speakers and timestamps
 - [ ] **M5 (Week 5)**: Summary with actions, decisions, risks, next steps; GET /meetings/:id/summary works
+- [ ] **M6 (Week 6)**: Web UI lists recordings, shows notes, plays audio, supports download
 
 ---
 
-## 14. MVP Success Criteria
+## 15. MVP Success Criteria
 
 | Criterion | Verification |
 |-----------|---------------|
@@ -799,10 +899,11 @@ SUMMARY_SERVICE_URL=http://summary-service:3005
 | ✔ Audio saved | mixed.wav and speaker WAVs exist in storage |
 | ✔ Transcript generated | Transcripts table has rows for meeting |
 | ✔ Summary stored | Summaries table has row; API returns summary |
+| ✔ Web UI | Browse recordings by date/participant; view notes; play/download audio |
 
 ---
 
-## 15. Future Enhancements
+## 16. Future Enhancements
 
 - **Real-time transcript**: Stream transcript as meeting progresses
 - **Live summary**: Incremental summary during meeting
