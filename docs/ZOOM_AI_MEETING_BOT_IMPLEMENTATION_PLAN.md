@@ -5,6 +5,7 @@
 This document provides a comprehensive implementation plan for building an AI-powered meeting bot that joins Zoom meetings, captures audio via Real-Time Meeting Streaming (RTMS), transcribes conversations, and generates intelligent summaries with action items, decisions, and next steps.
 
 > **Quick setup**: See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for a concise guide on how the bot joins calls, required API keys, and whitelisting.
+> **Architecture**: See [ARCHITECTURE.md](ARCHITECTURE.md) for system design, components, and data flow.
 
 ---
 

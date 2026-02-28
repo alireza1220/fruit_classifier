@@ -2,6 +2,8 @@
 
 Clear guide for setting up the Zoom AI Meeting Bot (Instruction Bot): how it joins calls, required API keys, and whitelisting.
 
+> **Architecture**: See [ARCHITECTURE.md](ARCHITECTURE.md) for system design, components, and data flow.
+
 ## Web App (Next.js)
 
 The project includes a **Next.js** frontend at `web-app/`:

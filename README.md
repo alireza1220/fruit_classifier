@@ -21,8 +21,9 @@ An AI-powered meeting bot that joins Zoom meetings, records audio, transcribes c
 
 ## Documentation
 
+- **[Architecture](docs/ARCHITECTURE.md)** — System architecture: components, data flow, tech stack
 - **[Implementation Plan](docs/IMPLEMENTATION_PLAN.md)** — Setup guide: how the bot joins calls, API keys, whitelisting
-- **[Full Architecture](docs/ZOOM_AI_MEETING_BOT_IMPLEMENTATION_PLAN.md)** — Detailed system design and phases
+- **[Full Implementation Plan](docs/ZOOM_AI_MEETING_BOT_IMPLEMENTATION_PLAN.md)** — Detailed phases and design
 
 ## Features
 
